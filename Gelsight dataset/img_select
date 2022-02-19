@@ -1,0 +1,45 @@
+import pandas as pd
+import numpy as np
+import cv2
+import os
+
+dirc = "A:/FYP/data/GelSight/GelSight/"
+savedirc="A:/FYP/data/GelSight/GelSight/CNN/"
+
+#read txt file to get different time values
+f = open(str(dirc)+"mat1/mat1_1.txt")
+time = f.read().splitlines()
+print(time)
+f.close()
+
+#read csv file which relates time value with image file name
+matData = pd.read_csv(str(dirc)+"mat1/mat1_1.csv")
+#show some data
+matData.head(10)
+
+#start data collection after sensor calibration 
+matData.loc[(matData['Timestamps'] <= time[1])]
+#start dynamic touch
+matData.loc[(matData['Timestamps'] >= time[1])&(matData['Timestamps'] <= time[2])]
+#start rotation
+matData.loc[(matData['Timestamps'] >= time[2])&(matData['Timestamps'] <= time[3])]
+#start to ratate clockwise (half curve)
+matData.loc[(matData['Timestamps'] >= time[3])&(matData['Timestamps'] <= time[4])]
+#start to rotate counter-clockwise (full curve)
+matData.loc[(matData['Timestamps'] >= time[4])&(matData['Timestamps'] <= time[5])]
+#rotate back (half curve)
+matData.loc[(matData['Timestamps'] >= time[5])&(matData['Timestamps'] <= time[6])]
+#finish
+
+def substract(a, b):                              
+    return "".join(a.rsplit(b))
+#if not os.path.exists(savedirc):   
+    #print("create path")
+    #os.makedirs(savedirc)
+    
+for ind in range(len(df)):
+    path = substract(df.iloc[ind,1],'/home/tas/Desktop/historical/processed/GelSight/')
+    img = cv2.imread(dirc+path, 1)
+    savepath = savedirc+path
+    print(savepath)
+    cv2.imwrite(savepath, img) 
