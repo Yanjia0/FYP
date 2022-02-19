@@ -1,0 +1,260 @@
+#pip install torch torchvision 
+#pip install einops
+
+import torch
+import numpy as np
+from torch.utils.data import Dataset
+from torch import nn, einsum
+from einops import rearrange, repeat
+from einops.layers.torch import Rearrange
+import torch.nn.functional as F
+import math, copy, time
+from torch.autograd import Variable
+import matplotlib.pyplot as plt
+import seaborn
+seaborn.set_context(context="talk")
+%matplotlib inline
+import torch.optim as optim
+from torch.optim.lr_scheduler import StepLR
+
+# load data
+def get_trainValData(path, k=0):
+    # read data
+    X_train_icub = torch.FloatTensor(np.load(path + 'icub_train_' + str(k) + '.npy'))
+    #X_train_icub = torch.FloatTensor(np.load(path + 'icub_trainAll' + '.npy'))
+    X_val_icub = torch.FloatTensor(np.load(path + 'icub_val_' + str(k) + '.npy'))
+    X_train_bio = torch.FloatTensor(np.load(path + 'bio_train_' + str(k) + '.npy'))
+    #X_train_bio = torch.FloatTensor(np.load(path + 'bio_trainAll' + '.npy'))
+    X_val_bio = torch.FloatTensor(np.load(path + 'bio_val_' + str(k) + '.npy'))
+    y_train = torch.FloatTensor(np.load(path + 'labels_train_' + str(k) + '.npy'))
+    #y_train = torch.FloatTensor(np.load(path + 'labels_trainAll' + '.npy'))
+    y_val = torch.FloatTensor(np.load(path + 'labels_val_' + str(k) + '.npy'))
+    return X_train_icub, X_val_icub, X_train_bio, X_val_bio, y_train, y_val
+        
+def get_testData(path):
+    X_test_icub = torch.FloatTensor(np.load(path + 'icub_test.npy'))
+    X_test_bio = torch.FloatTensor(np.load(path + 'bio_test.npy'))
+    y_test = torch.FloatTensor(np.load(path + 'labels_test.npy'))
+    return X_test_icub, X_test_bio, y_test
+
+def get_trainValLoader(path, k=0, batch_size=8, shuffle=True):
+      X_train_icub, X_val_icub,  X_train_bio, X_val_bio, y_train, y_val = get_trainValData(path, k)
+      train_dataset = torch.utils.data.TensorDataset(X_train_icub, X_train_bio, y_train)
+      train_loader = torch.utils.data.DataLoader(train_dataset,shuffle=shuffle,batch_size=batch_size)
+      val_dataset = torch.utils.data.TensorDataset(X_val_icub, X_val_bio, y_val)
+      val_loader = torch.utils.data.DataLoader(val_dataset,shuffle=shuffle,batch_size=batch_size) 
+      return train_loader, val_loader, train_dataset, val_dataset
+
+
+def get_testLoader(path, batch_size=8, shuffle=True):
+      X_test_icub, X_test_bio, y_test = get_testData(path)
+      test_dataset = torch.utils.data.TensorDataset(X_test_icub, X_test_bio, y_test)
+      test_loader = torch.utils.data.DataLoader(test_dataset,shuffle=shuffle,batch_size=batch_size)
+      return test_loader, test_dataset
+
+# vit model
+from torch import nn, einsum
+
+from einops import rearrange, repeat
+from einops.layers.torch import Rearrange
+def pair(t):
+    return t if isinstance(t, tuple) else (t, t)
+class PreNorm(nn.Module):
+    def __init__(self, dim, fn):
+        super().__init__()
+        self.norm = nn.LayerNorm(dim)
+        self.fn = fn
+    def forward(self, x, **kwargs):
+        return self.fn(self.norm(x), **kwargs)
+class Residual(nn.Module):
+    def __init__(self, fn):
+        super().__init__()
+        self.fn = fn
+    def forward(self, x, **kwargs):
+        return self.fn(x, **kwargs) + x
+class FeedForward(nn.Module):
+    def __init__(self, dim, hidden_dim, dropout = 0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, dim),
+            nn.Dropout(dropout)
+        )
+    def forward(self, x):
+        return self.net(x)
+class Attention(nn.Module):
+    def __init__(self, dim, heads = 8, dim_head = 64, dropout = 0.1):
+        super().__init__()
+        inner_dim = dim_head *  heads
+        project_out = not (heads == 1 and dim_head == dim)
+
+        self.heads = heads
+        self.scale = dim_head ** -0.5
+
+        self.attend = nn.Softmax(dim = -1)
+        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
+
+        self.to_out = nn.Sequential(
+            nn.Linear(inner_dim, dim),
+            nn.Dropout(dropout)
+        ) if project_out else nn.Identity()
+
+    def forward(self, x):
+        b, n, _, h = *x.shape, self.heads
+        qkv = self.to_qkv(x).chunk(3, dim = -1)
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), qkv)
+
+        dots = einsum('b h i d, b h j d -> b h i j', q, k) * self.scale
+        attn = self.attend(dots)
+
+        out = einsum('b h i j, b h j d -> b h i d', attn, v)
+        out = rearrange(out, 'b h n d -> b n (h d)')
+        return self.to_out(out)
+class Transformer(nn.Module):
+    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout = 0.1):
+        super().__init__()
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                Residual(PreNorm(dim, Attention(dim, heads = heads, dim_head = dim_head, dropout = dropout))),
+                Residual(PreNorm(dim, FeedForward(dim, mlp_dim, dropout = dropout)))
+                #PreNorm(dim, Attention(dim, heads = heads, dim_head = dim_head, dropout = dropout)),
+                #PreNorm(dim, FeedForward(dim, mlp_dim, dropout = dropout))
+            ]))
+    def forward(self, x):
+        for attn, ff in self.layers:
+            x = attn(x) + x
+            x = ff(x) + x
+        return x
+class ViT(nn.Module):
+    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, heads, mlp_dim, pool = 'cls', channels = 1, dim_head = 64, dropout = 0.1, emb_dropout = 0.2):
+        super().__init__()
+        image_height, image_width = pair(image_size)
+        patch_height, patch_width = pair(patch_size)
+
+        assert image_height % patch_height == 0 and image_width % patch_width == 0, 'Image dimensions must be divisible by the patch size.'
+
+        num_patches = (image_height // patch_height) * (image_width // patch_width)
+        patch_dim = channels * patch_height * patch_width
+        assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
+
+        self.to_patch_embedding = nn.Sequential(
+            Rearrange('b c (h p1)  (w p2)  -> b (h w) (p1 p2 c)', p1 = patch_height, p2 = patch_width),
+            nn.Linear(patch_dim, dim),
+        )
+
+        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches + 1, dim))
+        self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
+        self.dropout = nn.Dropout(emb_dropout)
+
+        self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
+
+        self.pool = pool
+        self.to_latent = nn.Identity()
+
+        self.mlp_head = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, num_classes)
+        )
+
+    def forward(self, img):
+        x = self.to_patch_embedding(img)
+        b, n, _ = x.shape
+
+        cls_tokens = repeat(self.cls_token, '() n d -> b n d', b = b)
+        x = torch.cat((cls_tokens, x), dim=1)
+        x += self.pos_embedding[:, :(n + 1)]
+        x = self.dropout(x)
+
+        x = self.transformer(x)
+
+        x = x.mean(dim = 1) if self.pool == 'mean' else x[:, 0]
+
+        x = self.to_latent(x)
+        return self.mlp_head(x)
+  
+  
+if __name__ == "__main__":
+  device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+  data_dir = '/kaggle/input/biodata/compiled_data/'
+  kfold_number = 0 # number of fold that is chosen as the validation fold, range 0-3
+  spike_ready = False # the data can be used for SNN training if the option is True
+  batch_size = 32
+  shuffle = True # where the data is shuffled for each epoch training 
+
+  train_loader, val_loader, train_dataset, val_dataset = get_trainValLoader(data_dir, k=kfold_number, spike_ready=False, batch_size=batch_size, shuffle=shuffle)
+  test_loader, test_dataset = get_testLoader(data_dir, spike_ready=False, batch_size=batch_size, shuffle=shuffle)
+  model = ViT(
+      image_size = (6,750),
+      patch_size = (3,5),
+      num_classes = 20,
+      dim = 750,
+      depth = 4,
+      heads = 6,
+      mlp_dim = 1000,
+      dropout = 0.3,
+      emb_dropout = 0.2
+  ).to(device)
+  parameters = filter(lambda p: p.requires_grad, model.parameters())
+  parameters = sum([np.prod(p.size()) for p in parameters]) / 1_000_000
+  print('Trainable Parameters: %.3fM' % parameters)
+
+  # loss function
+  criterion = nn.CrossEntropyLoss()
+  # optimizer
+  optimizer = optim.Adam(model.parameters(), lr=0.001)
+  # scheduler
+  scheduler = StepLR(optimizer, step_size=10, gamma=0.7)
+  device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+  train_acc = []
+  val_acc = []
+  min_loss = 100000
+  for epoch in range(300):
+      epoch_loss = 0
+      epoch_accuracy = 0
+      for i, (XI, XB,  y) in enumerate(train_loader):
+          XI=torch.transpose(XI, 2, 3)
+          XI=rearrange(XI,'b h w c ->b 1 h (w c)')
+          x = XI
+          data, label = x.to(device), y.long().to(device)
+          output = model(data)
+          loss = criterion(output, label)
+
+          optimizer.zero_grad()
+          loss.backward()
+          optimizer.step()
+
+          acc = (output.argmax(dim=1) == label).float().mean()
+
+          epoch_accuracy += acc / len(train_loader)
+          #print("train",epoch_accuracy)
+          epoch_loss += loss / len(train_loader)
+
+      with torch.no_grad():
+          epoch_val_accuracy = 0
+          epoch_val_loss = 0
+          for i, (XI, XB,  y) in enumerate(val_loader):
+              XI=torch.transpose(XI, 2, 3)
+              XI=rearrange(XI,'b h w c ->b 1 h (w c)')
+              x = XI
+              data, label = x.to(device), y.long().to(device)
+
+              val_output = model(data)
+              val_loss = criterion(val_output, label)
+
+              acc = (val_output.argmax(dim=1) == label).float().mean()
+              epoch_val_accuracy += acc / len(val_loader)
+              epoch_val_loss += val_loss / len(val_loader)
+
+      train_acc.append(epoch_accuracy)
+      val_acc.append(epoch_val_accuracy)
+      #save the best val model
+      if val_loss < min_loss:
+          min_loss = val_loss
+          print("save model",epoch_val_accuracy)
+          #torch.save(model, 'model.pth') 
+          torch.save(model.state_dict(),'model_state.pth')
+      if ((epoch+1)%10 == 0):
+          print(f"Epoch : {epoch+1} - loss : {epoch_loss:.4f} - acc: {epoch_accuracy:.4f} - val_loss : {epoch_val_loss:.4f} - val_acc: {epoch_val_accuracy:.4f}\n")
