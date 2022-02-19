@@ -37,6 +37,10 @@ def substract(a, b):
     #print("create path")
     #os.makedirs(savedirc)
     
+df = matData.loc[(matData['Timestamps'] >= time[1])&(matData['Timestamps'] <= time[2])]
+#print(df.iloc[0,1])
+path = substract(df.iloc[0,1],'/home/tas/Desktop/historical/processed/GelSight/')
+#print(path)    
 for ind in range(len(df)):
     path = substract(df.iloc[ind,1],'/home/tas/Desktop/historical/processed/GelSight/')
     img = cv2.imread(dirc+path, 1)
