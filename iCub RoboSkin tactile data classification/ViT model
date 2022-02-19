@@ -23,19 +23,15 @@ def get_trainValData(path, k=0):
     X_train_icub = torch.FloatTensor(np.load(path + 'icub_train_' + str(k) + '.npy'))
     #X_train_icub = torch.FloatTensor(np.load(path + 'icub_trainAll' + '.npy'))
     X_val_icub = torch.FloatTensor(np.load(path + 'icub_val_' + str(k) + '.npy'))
-    X_train_bio = torch.FloatTensor(np.load(path + 'bio_train_' + str(k) + '.npy'))
-    #X_train_bio = torch.FloatTensor(np.load(path + 'bio_trainAll' + '.npy'))
-    X_val_bio = torch.FloatTensor(np.load(path + 'bio_val_' + str(k) + '.npy'))
     y_train = torch.FloatTensor(np.load(path + 'labels_train_' + str(k) + '.npy'))
     #y_train = torch.FloatTensor(np.load(path + 'labels_trainAll' + '.npy'))
     y_val = torch.FloatTensor(np.load(path + 'labels_val_' + str(k) + '.npy'))
-    return X_train_icub, X_val_icub, X_train_bio, X_val_bio, y_train, y_val
+    return X_train_icub, X_val_icub, y_train, y_val
         
 def get_testData(path):
     X_test_icub = torch.FloatTensor(np.load(path + 'icub_test.npy'))
-    X_test_bio = torch.FloatTensor(np.load(path + 'bio_test.npy'))
     y_test = torch.FloatTensor(np.load(path + 'labels_test.npy'))
-    return X_test_icub, X_test_bio, y_test
+    return X_test_icub, y_test
 
 def get_trainValLoader(path, k=0, batch_size=8, shuffle=True):
       X_train_icub, X_val_icub,  X_train_bio, X_val_bio, y_train, y_val = get_trainValData(path, k)
@@ -180,12 +176,11 @@ if __name__ == "__main__":
   device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
   data_dir = '/kaggle/input/biodata/compiled_data/'
   kfold_number = 0 # number of fold that is chosen as the validation fold, range 0-3
-  spike_ready = False # the data can be used for SNN training if the option is True
   batch_size = 32
   shuffle = True # where the data is shuffled for each epoch training 
 
-  train_loader, val_loader, train_dataset, val_dataset = get_trainValLoader(data_dir, k=kfold_number, spike_ready=False, batch_size=batch_size, shuffle=shuffle)
-  test_loader, test_dataset = get_testLoader(data_dir, spike_ready=False, batch_size=batch_size, shuffle=shuffle)
+  train_loader, val_loader, train_dataset, val_dataset = get_trainValLoader(data_dir, k=kfold_number, batch_size=batch_size, shuffle=shuffle)
+  test_loader, test_dataset = get_testLoader(data_dir, batch_size=batch_size, shuffle=shuffle)
   model = ViT(
       image_size = (6,750),
       patch_size = (3,5),
@@ -214,7 +209,7 @@ if __name__ == "__main__":
   for epoch in range(300):
       epoch_loss = 0
       epoch_accuracy = 0
-      for i, (XI, XB,  y) in enumerate(train_loader):
+      for i, (XI, y) in enumerate(train_loader):
           XI=torch.transpose(XI, 2, 3)
           XI=rearrange(XI,'b h w c ->b 1 h (w c)')
           x = XI
@@ -235,7 +230,7 @@ if __name__ == "__main__":
       with torch.no_grad():
           epoch_val_accuracy = 0
           epoch_val_loss = 0
-          for i, (XI, XB,  y) in enumerate(val_loader):
+          for i, (XI, y) in enumerate(val_loader):
               XI=torch.transpose(XI, 2, 3)
               XI=rearrange(XI,'b h w c ->b 1 h (w c)')
               x = XI
